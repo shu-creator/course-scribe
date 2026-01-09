@@ -17,22 +17,16 @@ from course_scribe.skills import (
     generate_questions,
     validate_outputs,
 )
+from course_scribe.core.readers import read_file, FileReadError, get_supported_formats
 
 
-def _read_file(path: Path) -> str:
-    """Read file content, handling PDF if needed."""
-    if path.suffix.lower() == ".pdf":
-        try:
-            import pdfplumber
-
-            with pdfplumber.open(path) as pdf:
-                text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-            return text
-        except ImportError:
-            click.echo("Error: pdfplumber required for PDF files. Install with: pip install pdfplumber", err=True)
-            sys.exit(1)
-    else:
-        return path.read_text(encoding="utf-8")
+def _read_file(path: Path, use_ocr: bool = False) -> str:
+    """Read file content using the readers module."""
+    try:
+        return read_file(path, use_ocr=use_ocr)
+    except FileReadError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
 
 def _write_json(data: dict, path: Path) -> None:
@@ -55,9 +49,13 @@ def cli():
 @cli.command()
 @click.argument("syllabus_path", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output", type=click.Path(path_type=Path), help="Output JSON file")
-def ingest_syllabus(syllabus_path: Path, output: Path | None):
-    """Parse a syllabus file into structured format."""
-    content = _read_file(syllabus_path)
+@click.option("--ocr", is_flag=True, help="Use OCR for scanned PDFs")
+def ingest_syllabus(syllabus_path: Path, output: Path | None, ocr: bool):
+    """Parse a syllabus file into structured format.
+
+    Supported formats: .txt, .md, .pdf, .docx, .pptx
+    """
+    content = _read_file(syllabus_path, use_ocr=ocr)
     result = ingest_document(
         content=content,
         document_type=syllabus_path.suffix.lstrip("."),
@@ -76,9 +74,13 @@ def ingest_syllabus(syllabus_path: Path, output: Path | None):
 @click.argument("lecture_path", type=click.Path(exists=True, path_type=Path))
 @click.option("-w", "--week", type=int, help="Week number (auto-detected from filename if not specified)")
 @click.option("-o", "--output", type=click.Path(path_type=Path), help="Output JSON file")
-def ingest_lecture(lecture_path: Path, week: int | None, output: Path | None):
-    """Parse a lecture transcript/slides into structured format."""
-    content = _read_file(lecture_path)
+@click.option("--ocr", is_flag=True, help="Use OCR for scanned PDFs")
+def ingest_lecture(lecture_path: Path, week: int | None, output: Path | None, ocr: bool):
+    """Parse a lecture transcript/slides into structured format.
+
+    Supported formats: .txt, .md, .pdf, .docx, .pptx
+    """
+    content = _read_file(lecture_path, use_ocr=ocr)
     result = ingest_document(
         content=content,
         document_type=lecture_path.suffix.lstrip("."),
@@ -244,13 +246,17 @@ def validate(
 @click.argument("lecture_path", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output-dir", type=click.Path(path_type=Path), default=".", help="Output directory")
 @click.option("-w", "--week", type=int, help="Week number")
-def process(syllabus_path: Path, lecture_path: Path, output_dir: Path, week: int | None):
-    """Run full pipeline: ingest -> align -> summarize -> questions -> validate."""
+@click.option("--ocr", is_flag=True, help="Use OCR for scanned PDFs")
+def process(syllabus_path: Path, lecture_path: Path, output_dir: Path, week: int | None, ocr: bool):
+    """Run full pipeline: ingest -> align -> summarize -> questions -> validate.
+
+    Supported formats: .txt, .md, .pdf, .docx, .pptx
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     click.echo("Step 1: Ingesting syllabus...")
-    syllabus_content = _read_file(syllabus_path)
+    syllabus_content = _read_file(syllabus_path, use_ocr=ocr)
     syllabus = ingest_document(
         content=syllabus_content,
         document_type=syllabus_path.suffix.lstrip("."),
@@ -259,7 +265,7 @@ def process(syllabus_path: Path, lecture_path: Path, output_dir: Path, week: int
     )
 
     click.echo("Step 2: Ingesting lecture...")
-    lecture_content = _read_file(lecture_path)
+    lecture_content = _read_file(lecture_path, use_ocr=ocr)
     lecture = ingest_document(
         content=lecture_content,
         document_type=lecture_path.suffix.lstrip("."),
