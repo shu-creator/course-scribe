@@ -18,6 +18,17 @@ from course_scribe.skills import (
     validate_outputs,
 )
 from course_scribe.core.readers import read_file, FileReadError, get_supported_formats
+from course_scribe.core.project import (
+    init_project,
+    find_project_root,
+    load_config,
+    load_syllabus,
+    add_lecture_record,
+    get_output_path,
+    project_exists,
+    ProjectNotFoundError,
+    ProjectExistsError,
+)
 
 
 def _read_file(path: Path, use_ocr: bool = False) -> str:
@@ -44,6 +55,205 @@ def _write_markdown(content: str, path: Path) -> None:
 def cli():
     """course-scribe: Generate exam materials from lecture content."""
     pass
+
+
+# =============================================================================
+# Project Management Commands (init, add, status)
+# =============================================================================
+
+
+@cli.command()
+@click.argument("syllabus_path", type=click.Path(exists=True, path_type=Path))
+@click.option("--ocr", is_flag=True, help="Use OCR for scanned PDFs")
+def init(syllabus_path: Path, ocr: bool):
+    """Initialize a new project with a syllabus.
+
+    This creates a .course-scribe directory and saves the parsed syllabus.
+    After initialization, use 'add' to process lecture materials.
+
+    Example:
+        course-scribe init syllabus.pdf
+        course-scribe add lecture_01.pptx
+    """
+    # Check if project already exists
+    if project_exists():
+        click.echo("Error: Project already exists in this directory.", err=True)
+        click.echo("Use 'course-scribe status' to see current state.", err=True)
+        sys.exit(1)
+
+    click.echo(f"Initializing project with syllabus: {syllabus_path}")
+
+    # Read and parse syllabus
+    content = _read_file(syllabus_path, use_ocr=ocr)
+    syllabus = ingest_document(
+        content=content,
+        document_type=syllabus_path.suffix.lstrip("."),
+        source_filename=syllabus_path.name,
+        is_syllabus=True,
+    )
+
+    # Initialize project
+    try:
+        root = init_project(syllabus_path, syllabus)
+        course_name = syllabus.get("course_name", "Unknown Course")
+        total_weeks = syllabus.get("total_weeks", 0)
+
+        click.echo("")
+        click.echo(f"Project initialized successfully!")
+        click.echo(f"  Course: {course_name}")
+        click.echo(f"  Weeks in syllabus: {total_weeks}")
+        click.echo("")
+        click.echo("Next steps:")
+        click.echo("  course-scribe add <lecture_file> -w <week_number>")
+        click.echo("  course-scribe status")
+
+    except ProjectExistsError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("lecture_path", type=click.Path(exists=True, path_type=Path))
+@click.option("-w", "--week", type=int, required=True, help="Week number for this lecture")
+@click.option("--ocr", is_flag=True, help="Use OCR for scanned PDFs")
+def add(lecture_path: Path, week: int, ocr: bool):
+    """Add and process a lecture file.
+
+    Requires a project to be initialized first with 'init'.
+    Generates summary and questions, saves to output directory.
+
+    Example:
+        course-scribe add lecture_01.pptx -w 1
+        course-scribe add lecture_02.docx -w 2
+    """
+    # Find project
+    try:
+        root = find_project_root()
+    except ProjectNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    # Load syllabus
+    syllabus = load_syllabus(root)
+    output_dir = get_output_path(root)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    click.echo(f"Processing: {lecture_path} (Week {week})")
+
+    # Read and parse lecture
+    click.echo("  Reading lecture content...")
+    content = _read_file(lecture_path, use_ocr=ocr)
+    lecture = ingest_document(
+        content=content,
+        document_type=lecture_path.suffix.lstrip("."),
+        source_filename=lecture_path.name,
+        week_number=week,
+        is_syllabus=False,
+    )
+
+    prefix = f"week_{week:02d}"
+
+    # Check alignment
+    click.echo("  Checking syllabus alignment...")
+    alignment = align_with_syllabus(lecture, syllabus)
+    score = alignment.get("alignment_score", 0)
+    click.echo(f"    Alignment score: {score:.1%}")
+
+    # Generate summary
+    click.echo("  Generating summary...")
+    summary = summarize_lecture(lecture, syllabus, alignment)
+    from course_scribe.schemas.summary import StructuredSummary
+    summary_obj = StructuredSummary.model_validate(summary)
+    _write_markdown(summary_obj.to_markdown(), output_dir / f"summary_{prefix}.md")
+
+    # Generate questions
+    click.echo("  Generating questions...")
+    questions = generate_questions(lecture, syllabus)
+    _write_json(questions, output_dir / f"questions_{prefix}.json")
+
+    # Validate
+    click.echo("  Validating outputs...")
+    validation = validate_outputs(
+        {"summary": summary, "questions": questions},
+        lecture,
+        syllabus,
+    )
+    from course_scribe.schemas.validation import ValidationResult
+    val_obj = ValidationResult.model_validate(validation)
+    _write_markdown(val_obj.to_report(), output_dir / f"validation_{prefix}.md")
+
+    # Update project record
+    add_lecture_record(
+        week_number=week,
+        source_file=str(lecture_path),
+        has_summary=True,
+        has_questions=True,
+        root=root,
+    )
+
+    click.echo("")
+    click.echo(f"Done! Files saved to: {output_dir}")
+    click.echo(f"  - summary_{prefix}.md")
+    click.echo(f"  - questions_{prefix}.json")
+    click.echo(f"  - validation_{prefix}.md")
+
+    if not val_obj.is_valid:
+        click.echo("")
+        click.echo("Warning: Validation found issues. Check validation report.", err=True)
+
+
+@cli.command()
+def status():
+    """Show project status and processed lectures.
+
+    Example:
+        course-scribe status
+    """
+    try:
+        root = find_project_root()
+        config = load_config(root)
+        syllabus = load_syllabus(root)
+    except ProjectNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Course: {config.course_name}")
+    click.echo(f"Syllabus: {config.syllabus_source}")
+    click.echo(f"Output directory: {config.output_dir}")
+    click.echo("")
+
+    # Show syllabus weeks
+    total_weeks = syllabus.get("total_weeks", 0)
+    processed_weeks = {lec.week_number for lec in config.lectures}
+
+    click.echo(f"Progress: {len(processed_weeks)}/{total_weeks} weeks processed")
+    click.echo("")
+
+    if config.lectures:
+        click.echo("Processed lectures:")
+        for lec in config.lectures:
+            status_icons = []
+            if lec.has_summary:
+                status_icons.append("summary")
+            if lec.has_questions:
+                status_icons.append("questions")
+            status_str = ", ".join(status_icons) if status_icons else "no outputs"
+            click.echo(f"  Week {lec.week_number}: {lec.source_file} ({status_str})")
+    else:
+        click.echo("No lectures processed yet.")
+        click.echo("Use 'course-scribe add <lecture_file> -w <week>' to add lectures.")
+
+    # Show unprocessed weeks
+    if total_weeks > 0:
+        unprocessed = set(range(1, total_weeks + 1)) - processed_weeks
+        if unprocessed:
+            click.echo("")
+            click.echo(f"Remaining weeks: {sorted(unprocessed)}")
+
+
+# =============================================================================
+# Low-level Commands (for advanced usage)
+# =============================================================================
 
 
 @cli.command()
