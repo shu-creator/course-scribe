@@ -29,10 +29,26 @@ from course_scribe.schemas.questions import (
 )
 
 
+# System prompt for question generation
+QUESTION_SYSTEM_PROMPT = """あなたは大学の試験問題を作成する専門家です。
+
+重要な制約:
+1. 問題は必ず講義内容のみに基づくこと。外部知識を前提としない。
+2. 論述問題: 明確な採点基準と模範解答を含める
+3. 計算問題: 前提条件、変数定義、計算手順、単位、検算を必ず含める
+4. 選択問題: 4つの選択肢、正解1つ、各選択肢の解説を含める
+5. シラバスのトピック・キーワードに対応する問題を生成すること
+
+出力形式: JSON
+"""
+
+
 def generate_questions(
     lecture: dict,
     syllabus: dict,
     config: dict | None = None,
+    use_llm: bool = False,
+    llm_provider: str = "claude",
 ) -> dict:
     """Generate exam questions from lecture content.
 
@@ -44,14 +60,26 @@ def generate_questions(
             - calculation_count: Number of calculation questions (default: 1)
             - mc_count: Number of multiple choice questions (default: 3)
             - difficulty: "easy", "medium", "hard" (default: "medium")
+        use_llm: If True, use LLM for question generation
+        llm_provider: LLM provider to use (default: "claude")
 
     Returns:
         QuestionSet as dict
 
     Note:
-        This MVP generates TEMPLATE questions that demonstrate the structure.
-        Production version would use LLM for actual question generation.
+        When use_llm=False (default), generates template questions.
+        When use_llm=True, uses Claude API for intelligent question generation.
     """
+    config = config or {}
+
+    lecture_obj = LectureContent.model_validate(lecture)
+    syllabus_obj = Syllabus.model_validate(syllabus)
+
+    # Use LLM for intelligent question generation
+    if use_llm:
+        return _generate_with_llm(lecture_obj, syllabus_obj, config, llm_provider)
+
+    # Fallback to template generation
     config = config or {}
     essay_count = config.get("essay_count", 2)
     calc_count = config.get("calculation_count", 1)
@@ -407,3 +435,188 @@ def create_question_template(
             correct_answer="a",
             explanation="",
         ).model_dump()
+
+
+def _generate_with_llm(
+    lecture: LectureContent,
+    syllabus: Syllabus,
+    config: dict,
+    provider_name: str,
+) -> dict:
+    """Generate questions using LLM.
+
+    Args:
+        lecture: Parsed lecture content
+        syllabus: Parsed syllabus
+        config: Question generation configuration
+        provider_name: LLM provider to use
+
+    Returns:
+        QuestionSet as dict
+    """
+    from course_scribe.llm import get_provider
+
+    provider = get_provider(provider_name)
+    syllabus_week = syllabus.get_week(lecture.week_number)
+
+    # Build the prompt
+    prompt = _build_questions_prompt(lecture, syllabus_week, config)
+
+    # Generate questions using LLM
+    result = provider.generate_json(
+        prompt=prompt,
+        system_prompt=QUESTION_SYSTEM_PROMPT,
+        max_tokens=8192,  # Questions can be lengthy
+    )
+
+    week_number = lecture.week_number
+
+    # Ensure required fields exist
+    if "week_number" not in result:
+        result["week_number"] = week_number
+    if "title" not in result:
+        result["title"] = f"Week {week_number} Exam Questions"
+    if "essay_questions" not in result:
+        result["essay_questions"] = []
+    if "calculation_questions" not in result:
+        result["calculation_questions"] = []
+    if "multiple_choice_questions" not in result:
+        result["multiple_choice_questions"] = []
+
+    # Add question IDs if missing
+    for q in result.get("essay_questions", []):
+        if "question_id" not in q:
+            q["question_id"] = _generate_question_id()
+        if "question_type" not in q:
+            q["question_type"] = "essay"
+    for q in result.get("calculation_questions", []):
+        if "question_id" not in q:
+            q["question_id"] = _generate_question_id()
+        if "question_type" not in q:
+            q["question_type"] = "calculation"
+    for q in result.get("multiple_choice_questions", []):
+        if "question_id" not in q:
+            q["question_id"] = _generate_question_id()
+        if "question_type" not in q:
+            q["question_type"] = "multiple_choice"
+
+    # Validate through Pydantic
+    question_set = QuestionSet.model_validate(result)
+    return question_set.model_dump()
+
+
+def _build_questions_prompt(
+    lecture: LectureContent,
+    syllabus_week,
+    config: dict,
+) -> str:
+    """Build the prompt for question generation."""
+    essay_count = config.get("essay_count", 2)
+    calc_count = config.get("calculation_count", 1)
+    mc_count = config.get("mc_count", 3)
+    difficulty = config.get("difficulty", "medium")
+
+    parts = []
+
+    # Lecture content
+    parts.append("# 講義内容")
+    parts.append(f"タイトル: {lecture.title}")
+    parts.append(f"Week: {lecture.week_number}")
+    parts.append("")
+    parts.append(lecture.get_full_text())
+    parts.append("")
+
+    # Syllabus context
+    if syllabus_week:
+        parts.append("# シラバス情報（この週）")
+        parts.append(f"テーマ: {syllabus_week.title}")
+        parts.append(f"トピック: {', '.join(syllabus_week.topics)}")
+        parts.append(f"キーワード: {', '.join(syllabus_week.keywords)}")
+        parts.append("")
+
+    # Generation requirements
+    parts.append("# 問題生成要件")
+    parts.append(f"- 論述問題: {essay_count}問")
+    parts.append(f"- 計算問題: {calc_count}問（講義に計算内容がある場合のみ）")
+    parts.append(f"- 選択問題: {mc_count}問")
+    parts.append(f"- 難易度: {difficulty}")
+    parts.append("")
+
+    # Output format specification
+    parts.append("# 出力形式")
+    parts.append("""
+以下のJSON形式で試験問題を生成してください:
+
+{
+  "week_number": <週番号>,
+  "title": "<問題セットタイトル>",
+  "essay_questions": [
+    {
+      "question_text": "<問題文>",
+      "syllabus_topics": ["<関連トピック>"],
+      "difficulty": "easy|medium|hard",
+      "source_reference": "<出典（講義内の該当箇所）>",
+      "expected_length": "<想定回答文字数>",
+      "required_concepts": ["<必要な概念1>", "<必要な概念2>"],
+      "model_answer": {
+        "answer_text": "<模範解答>",
+        "key_points": ["<採点ポイント1>", "<採点ポイント2>"],
+        "grading": {
+          "full_marks": <配点>,
+          "criteria": ["<採点基準1>", "<採点基準2>"],
+          "partial_credit_rules": ["<部分点ルール1>"],
+          "common_mistakes": ["<よくある間違い1>"]
+        }
+      }
+    }
+  ],
+  "calculation_questions": [
+    {
+      "question_text": "<問題文>",
+      "syllabus_topics": ["<関連トピック>"],
+      "difficulty": "easy|medium|hard",
+      "source_reference": "<出典>",
+      "premises": ["<前提条件1>", "<前提条件2>"],
+      "variables": {
+        "<変数名>": "<説明と単位>"
+      },
+      "calculation_steps": [
+        {
+          "step_number": 1,
+          "description": "<手順の説明>",
+          "formula": "<使用公式>",
+          "calculation": "<計算過程>",
+          "result": "<結果と単位>"
+        }
+      ],
+      "final_answer": "<最終解答と単位>",
+      "verification": "<検算方法>",
+      "model_answer": { ... }
+    }
+  ],
+  "multiple_choice_questions": [
+    {
+      "question_text": "<問題文>",
+      "syllabus_topics": ["<関連トピック>"],
+      "difficulty": "easy|medium|hard",
+      "source_reference": "<出典>",
+      "choices": [
+        {"label": "a", "text": "<選択肢a>", "is_correct": true/false, "explanation": "<解説>"},
+        {"label": "b", "text": "<選択肢b>", "is_correct": true/false, "explanation": "<解説>"},
+        {"label": "c", "text": "<選択肢c>", "is_correct": true/false, "explanation": "<解説>"},
+        {"label": "d", "text": "<選択肢d>", "is_correct": true/false, "explanation": "<解説>"}
+      ],
+      "correct_answer": "<正解のラベル>",
+      "explanation": "<全体の解説>"
+    }
+  ]
+}
+
+重要:
+- 問題は必ず講義内容のみに基づくこと。外部知識を前提としない。
+- 計算問題は、前提条件・変数定義・計算手順・単位・検算を必ず含めること。
+- 各問題には必ず模範解答と採点基準を含めること。
+- シラバスのトピック・キーワードに対応する問題を生成すること。
+""")
+
+    return "\n".join(parts)
