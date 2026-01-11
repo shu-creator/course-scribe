@@ -1,131 +1,141 @@
 # course-scribe
 
-Syllabus-aligned lecture summarization and exam question generator from transcripts and course materials.
+シラバスに沿った講義要約と試験問題を自動生成するツール
 
-## Overview
+## 概要
 
-course-scribe generates:
-1. **Structured summaries** aligned with syllabus topics
-2. **Exam questions** (essay, calculation, multiple choice)
-3. **Model answers** with grading criteria
+course-scribeは以下を生成します：
+1. **構造化要約** - シラバスのトピックに沿った講義要約
+2. **試験問題** - 論述・計算・選択問題
+3. **模範解答** - 採点基準・部分点ルール付き
 
-All outputs are strictly validated to stay within syllabus and lecture scope.
+すべての出力はシラバスと講義内容の範囲内に制限されます。
 
-## Architecture
+## 対応フォーマット
 
-```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Ingest    │───▶│   Align     │───▶│  Summarize  │
-│  (PDF/MD)   │    │  Syllabus   │    │             │
-└─────────────┘    └─────────────┘    └──────┬──────┘
-                                             │
-                                             ▼
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│   Export    │◀───│  Validate   │◀───│  Generate   │
-│             │    │             │    │  Questions  │
-└─────────────┘    └─────────────┘    └─────────────┘
-```
+| フォーマット | 対応 | 備考 |
+|-------------|------|------|
+| Markdown (.md) | ✅ | |
+| Text (.txt) | ✅ | |
+| PDF (.pdf) | ✅ | OCR対応 |
+| Word (.docx) | ✅ | |
+| PowerPoint (.pptx) | ✅ | |
 
-### Skills (Reusable Pure Functions)
-
-Each skill is a pure function with JSON input/output:
-
-| Skill | Input | Output | Purpose |
-|-------|-------|--------|---------|
-| `ingest_document` | Raw text + metadata | Syllabus/LectureContent | Parse documents |
-| `align_with_syllabus` | Lecture + Syllabus | Alignment result | Check scope compliance |
-| `summarize_lecture` | Lecture + Syllabus | StructuredSummary | Generate summaries |
-| `generate_questions` | Lecture + Syllabus | QuestionSet | Create exam questions |
-| `validate_outputs` | Outputs + Sources | ValidationResult | Quality assurance |
-
-## Installation
+## インストール
 
 ```bash
+# 基本インストール
 pip install -e .
 
-# With development dependencies
+# 開発用
 pip install -e ".[dev]"
+
+# OCR対応（スキャンPDF用）
+pip install -e ".[ocr]"
+# + Tesseract OCRのインストールが必要
+#   macOS: brew install tesseract tesseract-lang
+#   Ubuntu: sudo apt install tesseract-ocr tesseract-ocr-jpn
 ```
 
-## Usage
+## 使い方
 
-### CLI Commands
+### 方法1: Claude Codeスラッシュコマンド（推奨）
 
-```bash
-# Full pipeline
-course-scribe process syllabus.txt lecture_01.txt -o output/
+Claude Code内で以下のコマンドを実行：
 
-# Individual steps
-course-scribe ingest-syllabus syllabus.txt -o syllabus.json
-course-scribe ingest-lecture lecture_01.txt -w 1 -o lecture.json
-course-scribe align lecture.json syllabus.json
-course-scribe summarize lecture.json syllabus.json -o summary.md
-course-scribe questions lecture.json syllabus.json -o questions.json
-course-scribe validate lecture.json syllabus.json --summary summary.json --questions questions.json
+```
+/exam-prep シラバス.pdf 講義.pptx 1
 ```
 
-### Python API
+Claude Codeが自動的に：
+1. ファイルを解析
+2. 要約を生成
+3. 試験問題を作成
+
+### 方法2: Python API
 
 ```python
 from course_scribe.skills import (
     ingest_document,
-    align_with_syllabus,
     summarize_lecture,
     generate_questions,
-    validate_outputs,
 )
 
-# Ingest syllabus
+# シラバス読み込み
 syllabus = ingest_document(
     content=syllabus_text,
-    document_type="txt",
+    document_type="md",
     is_syllabus=True,
 )
 
-# Ingest lecture
+# 講義読み込み
 lecture = ingest_document(
     content=lecture_text,
-    document_type="txt",
+    document_type="md",
     week_number=1,
 )
 
-# Check alignment
-alignment = align_with_syllabus(lecture, syllabus)
+# 要約生成（LLM使用）
+summary = summarize_lecture(lecture, syllabus, use_llm=True)
 
-# Generate summary
-summary = summarize_lecture(lecture, syllabus, alignment)
-
-# Generate questions
-questions = generate_questions(lecture, syllabus)
-
-# Validate outputs
-validation = validate_outputs(
-    {"summary": summary, "questions": questions},
-    lecture,
-    syllabus,
-)
+# 問題生成（LLM使用）
+questions = generate_questions(lecture, syllabus, use_llm=True)
 ```
 
-## Output Formats
+### 方法3: CLIコマンド
 
-### Summary (Markdown)
+```bash
+# フルパイプライン
+course-scribe process syllabus.txt lecture_01.txt -o output/
+
+# 個別ステップ
+course-scribe ingest-syllabus syllabus.txt -o syllabus.json
+course-scribe ingest-lecture lecture_01.txt -w 1 -o lecture.json
+course-scribe summarize lecture.json syllabus.json -o summary.md
+course-scribe questions lecture.json syllabus.json -o questions.json
+```
+
+## アーキテクチャ
+
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   Ingest    │───▶│   Align     │───▶│  Summarize  │
+│ (PDF/Word/  │    │  Syllabus   │    │   (LLM)     │
+│  PowerPoint)│    └─────────────┘    └──────┬──────┘
+└─────────────┘                              │
+                                             ▼
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   Export    │◀───│  Validate   │◀───│  Generate   │
+│             │    │             │    │  Questions  │
+└─────────────┘    └─────────────┘    │   (LLM)     │
+                                      └─────────────┘
+```
+
+### スキル一覧
+
+| スキル | 入力 | 出力 | 用途 |
+|--------|------|------|------|
+| `ingest_document` | テキスト + メタデータ | Syllabus/Lecture | ドキュメント解析 |
+| `align_with_syllabus` | Lecture + Syllabus | Alignment | スコープ確認 |
+| `summarize_lecture` | Lecture + Syllabus | Summary | 要約生成 |
+| `generate_questions` | Lecture + Syllabus | QuestionSet | 問題生成 |
+| `validate_outputs` | Outputs + Sources | Validation | 品質検証 |
+
+## 出力形式
+
+### 要約
 ```markdown
-# Week 1 Summary
-**Week 1**
+# Week 1 試験対策資料
 
-## Exam Focus Points
-- Understand: CPU
-- Contains formulas - review calculation steps
+## 講義要約
+[構造化された要約]
 
-## Section Heading
-Content...
-
-**Key Points:**
-- Key point 1
-- Key point 2
+## 試験重要ポイント
+- ポイント1
+- ポイント2
 ```
 
-### Questions (JSON)
+### 問題
 ```json
 {
   "week_number": 1,
@@ -135,30 +145,22 @@ Content...
 }
 ```
 
-## Design Principles
+## 制約事項
 
-1. **Skill-first**: Each module is a pure function, ready for extraction as a standalone skill
-2. **Schema-bound**: All I/O uses Pydantic models with JSON Schema export
-3. **Boundary separation**: File I/O only at CLI layer, core logic is pure
-4. **Scope enforcement**: Validation prevents content outside syllabus/lecture scope
+- すべての要約・問題は講義内容のみに基づく
+- 外部知識や推測は禁止
+- 計算問題には必須: 前提条件、変数定義、計算手順、単位、検算
 
-## Constraints
-
-- All summaries/questions must be based on lecture content only
-- No external knowledge or interpolation allowed
-- Calculation questions require: premises, variables, steps, units, verification
-- Scope violations are flagged during validation
-
-## Development
+## 開発
 
 ```bash
-# Run tests
-pytest
+# テスト実行
+python -m pytest
 
-# Run tests with coverage
-pytest --cov=course_scribe
+# カバレッジ付き
+python -m pytest --cov=course_scribe
 ```
 
-## License
+## ライセンス
 
 MIT

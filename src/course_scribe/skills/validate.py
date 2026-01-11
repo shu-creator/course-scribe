@@ -376,27 +376,53 @@ def _check_content_scope(
     # Get all keywords from lecture
     lecture_text_lower = lecture.raw_text.lower()
 
-    # Check each section's key points
-    for section in summary.sections:
-        for point in section.key_points:
-            # Simple heuristic: key points should have some basis in lecture
-            point_words = set(point.lower().split())
-            # Remove common words
-            common = {"the", "a", "an", "is", "are", "was", "were", "を", "の", "が", "に", "は"}
-            point_words -= common
+    def check_text_in_scope(text: str, location: str) -> ValidationIssue | None:
+        """Helper to check if text content is within lecture scope."""
+        text_words = set(text.lower().split())
+        # Remove common words (English and Japanese)
+        common = {
+            "the", "a", "an", "is", "are", "was", "were", "be", "been",
+            "have", "has", "had", "do", "does", "did", "will", "would",
+            "could", "should", "may", "might", "must", "can", "and", "or",
+            "but", "if", "then", "else", "when", "where", "what", "which",
+            "who", "how", "this", "that", "these", "those", "it", "its",
+            "を", "の", "が", "に", "は", "で", "と", "も", "へ", "から",
+            "まで", "より", "など", "という", "こと", "もの", "ため",
+        }
+        text_words -= common
 
-            # Check if at least some content words appear in lecture
-            matches = sum(1 for w in point_words if w in lecture_text_lower)
-            if len(point_words) > 3 and matches < len(point_words) * 0.3:
-                issues.append(
-                    ValidationIssue(
-                        category=IssueCategory.SCOPE_VIOLATION,
-                        severity=IssueSeverity.WARNING,
-                        message=f"Key point may contain content not from lecture: '{point[:50]}...'",
-                        location=f"section: {section.heading}",
-                        suggestion="Verify this content appears in lecture materials",
-                    )
+        # Check if at least some content words appear in lecture
+        if len(text_words) > 3:
+            matches = sum(1 for w in text_words if w in lecture_text_lower)
+            if matches < len(text_words) * 0.3:
+                return ValidationIssue(
+                    category=IssueCategory.SCOPE_VIOLATION,
+                    severity=IssueSeverity.WARNING,
+                    message=f"Content may not be from lecture: '{text[:50]}...'",
+                    location=location,
+                    suggestion="Verify this content appears in lecture materials",
                 )
+        return None
+
+    # Check each section's key points AND content
+    for section in summary.sections:
+        # Check key points
+        for point in section.key_points:
+            issue = check_text_in_scope(point, f"section: {section.heading}, key_point")
+            if issue:
+                issues.append(issue)
+
+        # Check section content
+        if section.content:
+            issue = check_text_in_scope(section.content, f"section: {section.heading}, content")
+            if issue:
+                issues.append(issue)
+
+    # Check exam_focus_points
+    for point in summary.exam_focus_points:
+        issue = check_text_in_scope(point, "exam_focus_points")
+        if issue:
+            issues.append(issue)
 
     return issues
 
