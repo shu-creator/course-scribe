@@ -139,8 +139,17 @@ def _generate_essay_questions(
     """
     questions = []
 
-    # Generate questions based on topics
-    for i, topic in enumerate(topics[:count]):
+    # Build sources list: topics first, then section headings as fallback
+    sources = list(topics)
+    if len(sources) < count:
+        for section in lecture.sections:
+            if section.heading and section.heading not in sources:
+                sources.append(section.heading)
+            if len(sources) >= count:
+                break
+
+    # Generate questions based on sources
+    for i, topic in enumerate(sources[:count]):
         # Find relevant content from lecture
         relevant_content = _find_relevant_content(lecture, topic)
 
@@ -208,10 +217,11 @@ def _generate_calculation_questions(
     has_calculations = _detect_calculation_content(lecture)
 
     if not has_calculations:
-        # Return empty if no calculation content in lecture
+        # Return empty list with warning (caller should handle this)
+        # Note: When count > 0 but no calc content, this returns []
         return questions
 
-    for i in range(min(count, 1)):  # Limit to 1 for MVP
+    for i in range(count):
         question = CalculationQuestion(
             question_id=_generate_question_id(),
             question_type=QuestionType.CALCULATION,
@@ -295,7 +305,19 @@ def _generate_mc_questions(
     """
     questions = []
 
-    for i, keyword in enumerate(keywords[:count]):
+    # Build sources list: keywords first, then extracted keywords from sections
+    sources = list(keywords)
+    if len(sources) < count:
+        for section in lecture.sections:
+            for kw in section.keywords_mentioned:
+                if kw not in sources:
+                    sources.append(kw)
+                if len(sources) >= count:
+                    break
+            if len(sources) >= count:
+                break
+
+    for i, keyword in enumerate(sources[:count]):
         # Create question about the keyword
         question = MultipleChoiceQuestion(
             question_id=_generate_question_id(),
