@@ -42,3 +42,11 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Course materials (keep private)
+*.pdf
+*.docx
+*.pptx
+examples/*.pdf
+examples/*.docx
+examples/*.pptx
