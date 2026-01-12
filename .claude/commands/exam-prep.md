@@ -1,6 +1,6 @@
 ---
 description: シラバスと講義資料から試験対策用の要約と問題を生成します
-allowed-tools: Bash(*), Read(*)
+allowed-tools: Bash(*), Read(*), Write(*)
 argument-hint: <syllabus_file> <lecture_file> [week_number]
 ---
 
@@ -11,7 +11,7 @@ argument-hint: <syllabus_file> <lecture_file> [week_number]
 1. まず以下のコマンドでファイルを解析してください:
 
 ```bash
-python scripts/parse_files.py "$1" "$2" ${3:-1}
+python3 scripts/parse_files.py "$1" "$2" ${3:-1}
 ```
 
 2. 解析結果のJSONから `syllabus.content` と `lecture.content` を取得
@@ -59,3 +59,25 @@ python scripts/parse_files.py "$1" "$2" ${3:-1}
 - 問題は講義内容のみに基づく（外部知識を前提としない）
 - シラバスのトピック・キーワードをカバーする
 - 採点基準は具体的かつ明確に
+
+---
+
+## 出力保存
+
+4. 生成完了後、ユーザーに保存形式を確認:
+
+「試験対策資料を生成しました。ファイルに保存しますか？
+- **md**: Markdownのみ
+- **docx**: Wordのみ
+- **both**: 両方
+- **no**: 保存しない
+
+保存先フォルダも指定してください（例: `./output/`）」
+
+5. ユーザーが保存を希望した場合:
+   - Writeツールで `{output_folder}/week{N}_試験対策.md` にMarkdownを保存
+   - Word出力が必要な場合は以下を実行:
+
+```bash
+cat {保存したmdファイル} | python3 scripts/save_output.py {output_folder}/week{N}_試験対策.docx
+```
