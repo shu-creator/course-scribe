@@ -1,6 +1,6 @@
 ---
 description: フォルダ内の複数講義資料から試験対策資料を一括生成します
-allowed-tools: Bash(*), Read(*)
+allowed-tools: Bash(*), Read(*), Write(*)
 argument-hint: <syllabus_file> <lectures_folder>
 ---
 
@@ -71,3 +71,25 @@ python3 scripts/parse_folder.py "$1" "$2"
 - シラバスのトピック・キーワードをカバーする
 - 採点基準は具体的かつ明確に
 - 週番号が検出できなかったファイルはファイル名で識別
+
+---
+
+## 出力保存
+
+4. 生成完了後、ユーザーに保存形式を確認:
+
+「試験対策資料を生成しました。ファイルに保存しますか？
+- **md**: Markdownのみ
+- **docx**: Wordのみ
+- **both**: 両方
+- **no**: 保存しない
+
+保存先フォルダも指定してください（例: `./output/`）」
+
+5. ユーザーが保存を希望した場合:
+   - Writeツールで `{output_folder}/{科目名}_試験対策.md` にMarkdownを保存
+   - Word出力が必要な場合は以下を実行:
+
+```bash
+cat {保存したmdファイル} | python3 scripts/save_output.py {output_folder}/{科目名}_試験対策.docx
+```
