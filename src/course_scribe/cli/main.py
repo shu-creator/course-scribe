@@ -116,7 +116,8 @@ def init(syllabus_path: Path, ocr: bool):
 @click.argument("lecture_path", type=click.Path(exists=True, path_type=Path))
 @click.option("-w", "--week", type=int, required=True, help="Week number for this lecture")
 @click.option("--ocr", is_flag=True, help="Use OCR for scanned PDFs")
-def add(lecture_path: Path, week: int, ocr: bool):
+@click.option("--use-llm", is_flag=True, help="Use LLM (Claude) for intelligent generation")
+def add(lecture_path: Path, week: int, ocr: bool, use_llm: bool):
     """Add and process a lecture file.
 
     Requires a project to be initialized first with 'init'.
@@ -124,7 +125,7 @@ def add(lecture_path: Path, week: int, ocr: bool):
 
     Example:
         course-scribe add lecture_01.pptx -w 1
-        course-scribe add lecture_02.docx -w 2
+        course-scribe add lecture_02.docx -w 2 --use-llm
     """
     # Find project
     try:
@@ -160,15 +161,21 @@ def add(lecture_path: Path, week: int, ocr: bool):
     click.echo(f"    Alignment score: {score:.1%}")
 
     # Generate summary
-    click.echo("  Generating summary...")
-    summary = summarize_lecture(lecture, syllabus, alignment)
+    if use_llm:
+        click.echo("  Generating summary (LLM)...")
+    else:
+        click.echo("  Generating summary (template)...")
+    summary = summarize_lecture(lecture, syllabus, alignment, use_llm=use_llm)
     from course_scribe.schemas.summary import StructuredSummary
     summary_obj = StructuredSummary.model_validate(summary)
     _write_markdown(summary_obj.to_markdown(), output_dir / f"summary_{prefix}.md")
 
     # Generate questions
-    click.echo("  Generating questions...")
-    questions = generate_questions(lecture, syllabus)
+    if use_llm:
+        click.echo("  Generating questions (LLM)...")
+    else:
+        click.echo("  Generating questions (template)...")
+    questions = generate_questions(lecture, syllabus, use_llm=use_llm)
     _write_json(questions, output_dir / f"questions_{prefix}.json")
 
     # Validate
@@ -338,12 +345,17 @@ def align(lecture_json: Path, syllabus_json: Path, output: Path | None, strict: 
 @click.argument("syllabus_json", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output", type=click.Path(path_type=Path), help="Output markdown file")
 @click.option("--json-output", type=click.Path(path_type=Path), help="Also output as JSON")
-def summarize(lecture_json: Path, syllabus_json: Path, output: Path | None, json_output: Path | None):
-    """Generate structured summary from lecture content."""
+@click.option("--use-llm", is_flag=True, help="Use LLM (Claude) for intelligent generation")
+def summarize(lecture_json: Path, syllabus_json: Path, output: Path | None, json_output: Path | None, use_llm: bool):
+    """Generate structured summary from lecture content.
+
+    By default, generates template-based summary.
+    Use --use-llm for intelligent LLM-powered generation (requires ANTHROPIC_API_KEY).
+    """
     lecture = json.loads(lecture_json.read_text(encoding="utf-8"))
     syllabus = json.loads(syllabus_json.read_text(encoding="utf-8"))
 
-    result = summarize_lecture(lecture, syllabus)
+    result = summarize_lecture(lecture, syllabus, use_llm=use_llm)
 
     # Export as markdown
     from course_scribe.schemas.summary import StructuredSummary
@@ -370,6 +382,7 @@ def summarize(lecture_json: Path, syllabus_json: Path, output: Path | None, json
 @click.option("--calc", type=int, default=1, help="Number of calculation questions")
 @click.option("--mc", type=int, default=3, help="Number of multiple choice questions")
 @click.option("--difficulty", type=click.Choice(["easy", "medium", "hard"]), default="medium")
+@click.option("--use-llm", is_flag=True, help="Use LLM (Claude) for intelligent generation")
 def questions(
     lecture_json: Path,
     syllabus_json: Path,
@@ -378,8 +391,13 @@ def questions(
     calc: int,
     mc: int,
     difficulty: str,
+    use_llm: bool,
 ):
-    """Generate exam questions from lecture content."""
+    """Generate exam questions from lecture content.
+
+    By default, generates template-based questions.
+    Use --use-llm for intelligent LLM-powered generation (requires ANTHROPIC_API_KEY).
+    """
     lecture = json.loads(lecture_json.read_text(encoding="utf-8"))
     syllabus = json.loads(syllabus_json.read_text(encoding="utf-8"))
 
@@ -390,7 +408,7 @@ def questions(
         "difficulty": difficulty,
     }
 
-    result = generate_questions(lecture, syllabus, config)
+    result = generate_questions(lecture, syllabus, config, use_llm=use_llm)
 
     if output:
         _write_json(result, output)
@@ -457,10 +475,14 @@ def validate(
 @click.option("-o", "--output-dir", type=click.Path(path_type=Path), default=".", help="Output directory")
 @click.option("-w", "--week", type=int, help="Week number")
 @click.option("--ocr", is_flag=True, help="Use OCR for scanned PDFs")
-def process(syllabus_path: Path, lecture_path: Path, output_dir: Path, week: int | None, ocr: bool):
+@click.option("--use-llm", is_flag=True, help="Use LLM (Claude) for intelligent generation")
+def process(syllabus_path: Path, lecture_path: Path, output_dir: Path, week: int | None, ocr: bool, use_llm: bool):
     """Run full pipeline: ingest -> align -> summarize -> questions -> validate.
 
     Supported formats: .txt, .md, .pdf, .docx, .pptx
+
+    By default, generates template-based outputs.
+    Use --use-llm for intelligent LLM-powered generation (requires ANTHROPIC_API_KEY).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -491,15 +513,21 @@ def process(syllabus_path: Path, lecture_path: Path, output_dir: Path, week: int
     alignment = align_with_syllabus(lecture, syllabus)
     click.echo(f"  Alignment score: {alignment['alignment_score']:.1%}")
 
-    click.echo("Step 4: Generating summary...")
-    summary = summarize_lecture(lecture, syllabus, alignment)
+    if use_llm:
+        click.echo("Step 4: Generating summary (LLM)...")
+    else:
+        click.echo("Step 4: Generating summary (template)...")
+    summary = summarize_lecture(lecture, syllabus, alignment, use_llm=use_llm)
     from course_scribe.schemas.summary import StructuredSummary
 
     summary_obj = StructuredSummary.model_validate(summary)
     _write_markdown(summary_obj.to_markdown(), output_dir / f"summary_{prefix}.md")
 
-    click.echo("Step 5: Generating questions...")
-    questions = generate_questions(lecture, syllabus)
+    if use_llm:
+        click.echo("Step 5: Generating questions (LLM)...")
+    else:
+        click.echo("Step 5: Generating questions (template)...")
+    questions = generate_questions(lecture, syllabus, use_llm=use_llm)
     _write_json(questions, output_dir / f"questions_{prefix}.json")
 
     click.echo("Step 6: Validating outputs...")
