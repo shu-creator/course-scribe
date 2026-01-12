@@ -1,3 +1,9 @@
+---
+description: シラバスと講義資料から試験対策用の要約と問題を生成します
+allowed-tools: Bash(*), Read(*)
+argument-hint: <syllabus_file> <lecture_file> [week_number]
+---
+
 シラバスと講義資料から試験対策用の要約と問題を生成します。
 
 ## 手順
