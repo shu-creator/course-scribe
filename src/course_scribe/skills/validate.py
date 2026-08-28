@@ -46,22 +46,44 @@ def validate_outputs(
     issues: list[ValidationIssue] = []
     checked_items: list[str] = []
 
-    # Validate summary if present
-    if "summary" in outputs:
-        summary_obj = StructuredSummary.model_validate(outputs["summary"])
-        summary_issues = _validate_summary(summary_obj, lecture_obj, syllabus_obj)
-        issues.extend(summary_issues)
-        checked_items.append("Summary structure and content")
-        checked_items.append("Summary syllabus alignment")
+    has_summary = "summary" in outputs
+    has_questions = "questions" in outputs
+    summary_obj = None
+    questions_obj = None
 
-    # Validate questions if present
-    if "questions" in outputs:
-        questions_obj = QuestionSet.model_validate(outputs["questions"])
-        question_issues = _validate_questions(questions_obj, lecture_obj, syllabus_obj)
-        issues.extend(question_issues)
-        checked_items.append("Question scope validation")
-        checked_items.append("Calculation question completeness")
-        checked_items.append("Answer key consistency")
+    if not has_summary and not has_questions:
+        issues.append(
+            ValidationIssue(
+                category=IssueCategory.MISSING_CONTENT,
+                severity=IssueSeverity.ERROR,
+                message="Outputs are empty; no summary or questions were provided",
+                location="outputs",
+                suggestion="Provide summary and/or questions based only on lecture content",
+            )
+        )
+        checked_items.append("Output presence")
+    else:
+        # Validate summary if present
+        if has_summary:
+            summary_obj = StructuredSummary.model_validate(outputs["summary"])
+            summary_issues = _validate_summary(summary_obj, lecture_obj, syllabus_obj)
+            issues.extend(summary_issues)
+            checked_items.append("Summary structure and content")
+            checked_items.append("Summary syllabus alignment")
+
+        # Validate questions if present
+        if has_questions:
+            questions_obj = QuestionSet.model_validate(outputs["questions"])
+            question_issues = _validate_questions(questions_obj, lecture_obj, syllabus_obj)
+            issues.extend(question_issues)
+            checked_items.append("Question scope validation")
+            checked_items.append("Calculation question completeness")
+            checked_items.append("Answer key consistency")
+
+        issues.extend(
+            _check_grounding_fail_closed(lecture_obj, summary_obj, questions_obj)
+        )
+        checked_items.append("Lecture grounding of output material")
 
     # Determine overall validity
     is_valid = not any(i.severity == IssueSeverity.ERROR for i in issues)
@@ -361,6 +383,269 @@ def _validate_mc_question(
                 suggestion="Ensure correct_answer matches the choice with is_correct=True",
             )
         )
+
+    return issues
+
+
+# Fail-closed grounding applies only to long, clearly unsupported material.
+# Short or 2+ token lexical overlap stays with the warning-level heuristic below.
+# A single lecture-derived token does not mask an otherwise unsupported remainder.
+_MIN_UNGROUNDED_CHARS = 40
+_MIN_UNGROUNDED_TOKENS = 8
+_MAX_FAIL_CLOSED_TOKEN_MATCHES = 1
+_MIN_CJK_PARAPHRASE_CHARS = 20
+_CJK_BIGRAM_OVERLAP = 0.5
+_TOKEN_RE = re.compile(
+    r"[A-Za-z][A-Za-z0-9_-]*|[0-9]+(?:\.[0-9]+)?|[ぁ-んァ-ン一-龯]+"
+)
+_CJK_CHAR_RE = re.compile(r"[ぁ-んァ-ン一-龯ー]")
+_LATIN_STOPWORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "been",
+    "have", "has", "had", "do", "does", "did", "will", "would",
+    "could", "should", "may", "might", "must", "can", "and", "or",
+    "but", "if", "then", "else", "when", "where", "what", "which",
+    "who", "how", "this", "that", "these", "those", "it", "its",
+}
+
+
+def _normalize_text(text: str) -> str:
+    """Collapse whitespace and lowercase for containment checks."""
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _content_tokens(text: str) -> set[str]:
+    """Distinctive tokens used only for the fail-closed overlap gate."""
+    tokens = {m.group(0).lower() for m in _TOKEN_RE.finditer(text)}
+    tokens -= _LATIN_STOPWORDS
+    return {t for t in tokens if len(t) >= 3}
+
+
+def _cjk_chars(text: str) -> str:
+    return "".join(_CJK_CHAR_RE.findall(text))
+
+
+def _char_ngrams(text: str, n: int = 2) -> set[str]:
+    if len(text) < n:
+        return {text} if text else set()
+    return {text[i : i + n] for i in range(len(text) - n + 1)}
+
+
+def _is_cjk_paraphrase_grounded(text: str, lecture_body: str) -> bool:
+    """True for lecture-grounded Japanese paraphrases that are not substrings."""
+    text_cjk = _cjk_chars(text)
+    lecture_cjk = _cjk_chars(lecture_body)
+    if (
+        len(text_cjk) < _MIN_CJK_PARAPHRASE_CHARS
+        or len(lecture_cjk) < _MIN_CJK_PARAPHRASE_CHARS
+    ):
+        return False
+    text_grams = _char_ngrams(text_cjk, 2)
+    lecture_grams = _char_ngrams(lecture_cjk, 2)
+    if not text_grams:
+        return False
+    overlap = len(text_grams & lecture_grams) / len(text_grams)
+    return overlap >= _CJK_BIGRAM_OVERLAP
+
+
+def _is_clearly_ungrounded(text: str, lecture_body: str) -> bool:
+    """True only for clearly unsupported material, not ambiguous overlap.
+
+    Direct containment in the lecture body is grounded. A 40+ character
+    Japanese paraphrase with high character overlap is grounded even when it
+    is not an exact substring. Short fragments and 2+ distinctive-token
+    overlap are left to the warning-level heuristic. A single lecture-derived
+    token does not mask a long unsupported remainder.
+    """
+    if not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    text_norm = _normalize_text(stripped)
+    lecture_norm = _normalize_text(lecture_body)
+    if text_norm and lecture_norm and text_norm in lecture_norm:
+        return False
+
+    if _is_cjk_paraphrase_grounded(stripped, lecture_body):
+        return False
+
+    tokens = _content_tokens(stripped)
+    is_long_statement = (
+        len(text_norm) >= _MIN_UNGROUNDED_CHARS
+        or len(tokens) >= _MIN_UNGROUNDED_TOKENS
+    )
+    if not is_long_statement:
+        return False
+
+    if not tokens:
+        return True
+
+    lecture_lower = lecture_body.lower()
+    matches = sum(1 for token in tokens if token in lecture_lower)
+    return matches <= _MAX_FAIL_CLOSED_TOKEN_MATCHES
+
+
+def _ungrounded_issue(location: str, text: str) -> ValidationIssue:
+    preview = text.strip()
+    if len(preview) > 80:
+        preview = preview[:80] + "..."
+    return ValidationIssue(
+        category=IssueCategory.SCOPE_VIOLATION,
+        severity=IssueSeverity.ERROR,
+        message=f"Unsupported material not grounded in lecture content: '{preview}'",
+        location=location,
+        suggestion="Replace with content taken from the lecture body",
+    )
+
+
+def _collect_ungrounded(
+    issues: list[ValidationIssue],
+    lecture_body: str,
+    location: str,
+    text: str,
+) -> None:
+    if _is_clearly_ungrounded(text, lecture_body):
+        issues.append(_ungrounded_issue(location, text))
+
+
+def _variable_location(question_index: int, key: str) -> str:
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        return f"questions.calculation_questions[{question_index}].variables.{key}"
+    return f"questions.calculation_questions[{question_index}].variables[{key!r}]"
+
+
+def _check_grounding_fail_closed(
+    lecture: LectureContent,
+    summary: StructuredSummary | None,
+    questions: QuestionSet | None,
+) -> list[ValidationIssue]:
+    """Fail closed when material fields contain clearly lecture-external text."""
+    issues: list[ValidationIssue] = []
+    lecture_body = lecture.raw_text
+    if lecture.sections:
+        lecture_body = lecture_body + "\n" + lecture.get_full_text()
+
+    if summary is not None:
+        for i, section in enumerate(summary.sections):
+            _collect_ungrounded(
+                issues,
+                lecture_body,
+                f"summary.sections[{i}].content",
+                section.content,
+            )
+            for j, point in enumerate(section.key_points):
+                _collect_ungrounded(
+                    issues,
+                    lecture_body,
+                    f"summary.sections[{i}].key_points[{j}]",
+                    point,
+                )
+        for j, point in enumerate(summary.exam_focus_points):
+            _collect_ungrounded(
+                issues,
+                lecture_body,
+                f"summary.exam_focus_points[{j}]",
+                point,
+            )
+
+    if questions is not None:
+        for i, eq in enumerate(questions.essay_questions):
+            prefix = f"questions.essay_questions[{i}]"
+            _collect_ungrounded(
+                issues, lecture_body, f"{prefix}.question_text", eq.question_text
+            )
+            for j, concept in enumerate(eq.required_concepts):
+                _collect_ungrounded(
+                    issues,
+                    lecture_body,
+                    f"{prefix}.required_concepts[{j}]",
+                    concept,
+                )
+            if eq.model_answer is not None:
+                _collect_ungrounded(
+                    issues,
+                    lecture_body,
+                    f"{prefix}.model_answer.answer_text",
+                    eq.model_answer.answer_text,
+                )
+                for j, point in enumerate(eq.model_answer.key_points):
+                    _collect_ungrounded(
+                        issues,
+                        lecture_body,
+                        f"{prefix}.model_answer.key_points[{j}]",
+                        point,
+                    )
+
+        for i, cq in enumerate(questions.calculation_questions):
+            prefix = f"questions.calculation_questions[{i}]"
+            _collect_ungrounded(
+                issues, lecture_body, f"{prefix}.question_text", cq.question_text
+            )
+            for j, premise in enumerate(cq.premises):
+                _collect_ungrounded(
+                    issues, lecture_body, f"{prefix}.premises[{j}]", premise
+                )
+            for key, value in cq.variables.items():
+                _collect_ungrounded(
+                    issues, lecture_body, _variable_location(i, key), value
+                )
+            for j, step in enumerate(cq.calculation_steps):
+                step_prefix = f"{prefix}.calculation_steps[{j}]"
+                _collect_ungrounded(
+                    issues, lecture_body, f"{step_prefix}.description", step.description
+                )
+                _collect_ungrounded(
+                    issues, lecture_body, f"{step_prefix}.formula", step.formula
+                )
+                _collect_ungrounded(
+                    issues,
+                    lecture_body,
+                    f"{step_prefix}.calculation",
+                    step.calculation,
+                )
+                _collect_ungrounded(
+                    issues, lecture_body, f"{step_prefix}.result", step.result
+                )
+            _collect_ungrounded(
+                issues, lecture_body, f"{prefix}.final_answer", cq.final_answer
+            )
+            _collect_ungrounded(
+                issues, lecture_body, f"{prefix}.verification", cq.verification
+            )
+            if cq.model_answer is not None:
+                _collect_ungrounded(
+                    issues,
+                    lecture_body,
+                    f"{prefix}.model_answer.answer_text",
+                    cq.model_answer.answer_text,
+                )
+                for j, point in enumerate(cq.model_answer.key_points):
+                    _collect_ungrounded(
+                        issues,
+                        lecture_body,
+                        f"{prefix}.model_answer.key_points[{j}]",
+                        point,
+                    )
+
+        for i, mc in enumerate(questions.multiple_choice_questions):
+            prefix = f"questions.multiple_choice_questions[{i}]"
+            _collect_ungrounded(
+                issues, lecture_body, f"{prefix}.question_text", mc.question_text
+            )
+            for j, choice in enumerate(mc.choices):
+                _collect_ungrounded(
+                    issues, lecture_body, f"{prefix}.choices[{j}].text", choice.text
+                )
+                _collect_ungrounded(
+                    issues,
+                    lecture_body,
+                    f"{prefix}.choices[{j}].explanation",
+                    choice.explanation,
+                )
+            _collect_ungrounded(
+                issues, lecture_body, f"{prefix}.explanation", mc.explanation
+            )
 
     return issues
 

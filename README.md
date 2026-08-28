@@ -151,6 +151,15 @@ course-scribe questions lecture.json syllabus.json -o questions.json
 - 外部知識や推測は禁止
 - 計算問題には必須: 前提条件、変数定義、計算手順、単位、検算
 
+`validate_outputs` はこの契約を検査する。講義本文から明らかに支持されない内容は fail-closed とし、曖昧な語彙重複は確定的な hallucination 判定にしない。
+
+| 判定 | 条件 | 結果 |
+|------|------|------|
+| fail-closed | 要約・論述・計算・選択の対象フィールドに、講義本文から明らかに支持されない長い技術的記述が含まれる。講義由来トークンが1語だけ重なる場合も、未支持の残りをマスクしない | `category=scope_violation`, `severity=error`, `is_valid=false`。`location` は対象フィールドの安定したドット／インデックスパス（例: `summary.sections[0].content`） |
+| Japanese paraphrase (non-error) | 講義に根拠のある40文字以上の日本語言い換えで、本文の完全な部分文字列ではない | スコープ error にしない（`is_valid=true`、scope error 0） |
+| heuristic (warning) | 2語以上の語彙部分一致など、根拠が不確実な overlap | 既存の warning に留める。error には昇格しない |
+| empty outputs | 要約も問題もない | `category=missing_content`, `severity=error`, `location=outputs`, `is_valid=false` |
+
 ## 開発
 
 ```bash
