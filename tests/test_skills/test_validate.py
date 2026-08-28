@@ -609,3 +609,82 @@ def test_grounded_english_and_japanese_material_passes(
     ]
     assert scope_errors == []
     assert result["is_valid"] is True
+
+
+P1_FIELD_PATHS = [
+    "summary.sections[0].content",
+    "questions.essay_questions[0].model_answer.answer_text",
+    "questions.calculation_questions[0].calculation_steps[0].description",
+    "questions.multiple_choice_questions[0].choices[0].explanation",
+]
+
+SINGLE_LECTURE_TOKEN_UNSUPPORTED = (
+    "Chromatin immunoprecipitation sequencing maps histone acetylation peaks "
+    "at distal enhancers during zygotic genome activation in early Drosophila "
+    "embryogenesis keyword1."
+)
+
+JAPANESE_LECTURE_TEXT = (
+    "本日の講義ではニュートンの第二法則を扱う。"
+    "物体に働く正味の力は質量と加速度の積に等しい。"
+    "力の単位はニュートンである。質量はキログラムで表す。"
+    "加速度はメートル毎秒毎秒である。"
+    "検算では次元が一致することを確認する。"
+)
+
+JAPANESE_GROUNDED_PARAPHRASE = (
+    "ニュートンの第二法則の説明では、物体へ働く正味の力を質量と加速度の積として扱うと述べている。"
+)
+
+
+def _combined_outputs() -> dict:
+    return {
+        "summary": copy.deepcopy(_minimal_summary()),
+        "questions": {
+            "week_number": 1,
+            "title": "Questions",
+            "essay_questions": copy.deepcopy(
+                _minimal_essay_questions()["essay_questions"]
+            ),
+            "calculation_questions": copy.deepcopy(
+                _minimal_calculation_questions()["calculation_questions"]
+            ),
+            "multiple_choice_questions": copy.deepcopy(
+                _minimal_mc_questions()["multiple_choice_questions"]
+            ),
+        },
+    }
+
+
+@pytest.mark.parametrize("field_path", P1_FIELD_PATHS)
+def test_grounded_token_does_not_mask_long_unsupported_material(
+    field_path, lecture_dict, syllabus_dict
+):
+    outputs = _combined_outputs()
+    _set_path(outputs, field_path, SINGLE_LECTURE_TOKEN_UNSUPPORTED)
+    result = validate_outputs(outputs, lecture_dict, syllabus_dict)
+    _assert_scope_violation_at(result, field_path)
+
+
+@pytest.mark.parametrize("field_path", P1_FIELD_PATHS)
+def test_grounded_japanese_paraphrase_stays_non_error(field_path, syllabus_dict):
+    assert len(JAPANESE_GROUNDED_PARAPHRASE) >= 40
+    assert JAPANESE_GROUNDED_PARAPHRASE not in JAPANESE_LECTURE_TEXT
+    lecture = {
+        "week_number": 1,
+        "title": "Lecture 1",
+        "raw_text": JAPANESE_LECTURE_TEXT,
+        "sections": [],
+        "source_type": "txt",
+        "source_filename": "lecture_01.txt",
+    }
+    outputs = _combined_outputs()
+    _set_path(outputs, field_path, JAPANESE_GROUNDED_PARAPHRASE)
+    result = validate_outputs(outputs, lecture, syllabus_dict)
+    scope_errors = [
+        issue
+        for issue in result["issues"]
+        if issue["category"] == "scope_violation" and issue["severity"] == "error"
+    ]
+    assert scope_errors == []
+    assert result["is_valid"] is True

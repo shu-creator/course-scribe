@@ -388,12 +388,17 @@ def _validate_mc_question(
 
 
 # Fail-closed grounding applies only to long, clearly unsupported material.
-# Short or partial lexical overlap stays with the warning-level heuristic below.
+# Short or 2+ token lexical overlap stays with the warning-level heuristic below.
+# A single lecture-derived token does not mask an otherwise unsupported remainder.
 _MIN_UNGROUNDED_CHARS = 40
 _MIN_UNGROUNDED_TOKENS = 8
+_MAX_FAIL_CLOSED_TOKEN_MATCHES = 1
+_MIN_CJK_PARAPHRASE_CHARS = 20
+_CJK_BIGRAM_OVERLAP = 0.5
 _TOKEN_RE = re.compile(
     r"[A-Za-z][A-Za-z0-9_-]*|[0-9]+(?:\.[0-9]+)?|[ぁ-んァ-ン一-龯]+"
 )
+_CJK_CHAR_RE = re.compile(r"[ぁ-んァ-ン一-龯ー]")
 _LATIN_STOPWORDS = {
     "the", "a", "an", "is", "are", "was", "were", "be", "been",
     "have", "has", "had", "do", "does", "did", "will", "would",
@@ -415,11 +420,41 @@ def _content_tokens(text: str) -> set[str]:
     return {t for t in tokens if len(t) >= 3}
 
 
+def _cjk_chars(text: str) -> str:
+    return "".join(_CJK_CHAR_RE.findall(text))
+
+
+def _char_ngrams(text: str, n: int = 2) -> set[str]:
+    if len(text) < n:
+        return {text} if text else set()
+    return {text[i : i + n] for i in range(len(text) - n + 1)}
+
+
+def _is_cjk_paraphrase_grounded(text: str, lecture_body: str) -> bool:
+    """True for lecture-grounded Japanese paraphrases that are not substrings."""
+    text_cjk = _cjk_chars(text)
+    lecture_cjk = _cjk_chars(lecture_body)
+    if (
+        len(text_cjk) < _MIN_CJK_PARAPHRASE_CHARS
+        or len(lecture_cjk) < _MIN_CJK_PARAPHRASE_CHARS
+    ):
+        return False
+    text_grams = _char_ngrams(text_cjk, 2)
+    lecture_grams = _char_ngrams(lecture_cjk, 2)
+    if not text_grams:
+        return False
+    overlap = len(text_grams & lecture_grams) / len(text_grams)
+    return overlap >= _CJK_BIGRAM_OVERLAP
+
+
 def _is_clearly_ungrounded(text: str, lecture_body: str) -> bool:
     """True only for clearly unsupported material, not ambiguous overlap.
 
-    Direct containment in the lecture body is grounded. Short fragments and
-    any distinctive-token overlap are left to the warning-level heuristic.
+    Direct containment in the lecture body is grounded. A 40+ character
+    Japanese paraphrase with high character overlap is grounded even when it
+    is not an exact substring. Short fragments and 2+ distinctive-token
+    overlap are left to the warning-level heuristic. A single lecture-derived
+    token does not mask a long unsupported remainder.
     """
     if not isinstance(text, str):
         return False
@@ -430,6 +465,9 @@ def _is_clearly_ungrounded(text: str, lecture_body: str) -> bool:
     text_norm = _normalize_text(stripped)
     lecture_norm = _normalize_text(lecture_body)
     if text_norm and lecture_norm and text_norm in lecture_norm:
+        return False
+
+    if _is_cjk_paraphrase_grounded(stripped, lecture_body):
         return False
 
     tokens = _content_tokens(stripped)
@@ -445,7 +483,7 @@ def _is_clearly_ungrounded(text: str, lecture_body: str) -> bool:
 
     lecture_lower = lecture_body.lower()
     matches = sum(1 for token in tokens if token in lecture_lower)
-    return matches == 0
+    return matches <= _MAX_FAIL_CLOSED_TOKEN_MATCHES
 
 
 def _ungrounded_issue(location: str, text: str) -> ValidationIssue:
